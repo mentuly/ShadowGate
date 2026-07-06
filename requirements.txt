@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+httpx
+PyYAML
+redis>=5.0
+websockets
+Jinja2
+python-multipart
+scikit-learn
+pandas
+pytest

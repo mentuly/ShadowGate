@@ -1,0 +1,23 @@
+target_backend: http://httpbin.org
+
+waf:
+  enabled: true
+  rules:
+    sql_injection: true
+    xss: true
+    path_traversal: true
+
+rate_limit:
+  enabled: false
+  capacity: 20
+  refill_rate: 1.0
+  cost_per_request: 1
+  block_threshold: 5
+  suspicious_threshold: 10
+  suspicious_score: 1
+  block_duration_seconds: 300
+  grace_requests: 2
+
+admin:
+  enabled: true
+  default_refresh_seconds: 5

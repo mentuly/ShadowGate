@@ -1,0 +1,40 @@
+version: '3.9'
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: task_redis
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis-data:/data
+
+  proxy:
+    build: .
+    container_name: task_proxy
+    command: uvicorn proxy.app:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - '8000:8000'
+    depends_on:
+      - redis
+    volumes:
+      - .:/app
+    environment:
+      - PROXY_TARGET=http://httpbin.org
+      - REDIS_URL=redis://redis:6379/0
+
+  admin:
+    build: .
+    container_name: task_admin
+    command: uvicorn admin.app:app --host 0.0.0.0 --port 8080 --reload
+    ports:
+      - '8080:8080'
+    depends_on:
+      - redis
+    volumes:
+      - .:/app
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - CONFIG_FILE=/app/config.yaml
+
+volumes:
+  redis-data:
