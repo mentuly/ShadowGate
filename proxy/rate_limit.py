@@ -53,10 +53,6 @@ end
 
 local score = tonumber(redis.call('hincrby', suspicious_key, key, suspicious_score) or 0)
 redis.call('expire', suspicious_key, block_duration)
-if score >= suspicious_threshold then
-  return {'grey', tostring(score)}
-end
-
 return {'grey', tostring(score)}
 """
 

@@ -1,6 +1,0 @@
-{"timestamp": 1783277112.9274828, "client_ip": "testclient", "method": "GET", "path": "/hello", "query": "", "path_length": 6, "header_count": 5, "body_size": 0, "frequency": 1, "user_agent": "testclient"}
-{"timestamp": 1783277161.6025903, "client_ip": "127.0.0.1", "method": "GET", "path": "/hello", "query": "", "path_length": 6, "header_count": 5, "body_size": 0, "frequency": 1, "user_agent": "python-httpx/0.28.1"}
-{"timestamp": 1783277219.8969786, "client_ip": "127.0.0.1", "method": "GET", "path": "/hello", "query": "", "path_length": 6, "header_count": 5, "body_size": 0, "frequency": 1, "user_agent": "python-httpx/0.28.1"}
-{"timestamp": 1783277288.4198158, "client_ip": "127.0.0.1", "method": "GET", "path": "/anything", "query": "", "path_length": 9, "header_count": 5, "body_size": 0, "frequency": 1, "user_agent": "python-httpx/0.28.1"}
-{"timestamp": 1783277507.08378, "client_ip": "127.0.0.1", "method": "GET", "path": "/anything", "query": "", "path_length": 9, "header_count": 5, "body_size": 0, "frequency": 1, "user_agent": "python-httpx/0.28.1"}
-{"timestamp": 1783277636.1147008, "client_ip": "127.0.0.1", "method": "GET", "path": "/anything", "query": "", "path_length": 9, "header_count": 5, "body_size": 0, "frequency": 1, "user_agent": "python-httpx/0.28.1"}

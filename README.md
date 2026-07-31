@@ -50,6 +50,27 @@ docker compose up
 ### Конфігурація
 Налаштування зберігаються у файлі config.yaml. Там можна змінити цільовий бекенд, правила WAF і параметри обмеження запитів.
 
+### Безпека
+- Адмін-панель вимагає токен доступу. Встановіть змінну середовища ADMIN_AUTH_TOKEN перед запуском сервісу, наприклад: ADMIN_AUTH_TOKEN='ваш-сильний-секрет'.
+- Для Docker Compose зручно використовувати файл .env або запускати команду з `--env-file`.
+- Для доступу до admin UI використовуйте заголовок X-Admin-Token або Authorization: Bearer <token>.
+- Проксі блокує спроби відправити запит на довільний зовнішній хост, а WAF перевіряє шлях, query, body і заголовки.
+
+### Security checklist
+- [x] Proxy blocks absolute URL targets to avoid SSRF/open-proxy behavior.
+- [x] WAF output escapes attacker-controlled content to prevent reflected XSS.
+- [x] Admin routes require authentication via token.
+- [x] Admin service is exposed only on localhost in Docker Compose.
+- [x] Environment-based secrets are documented via .env and .env.example.
+- [x] Generated artifacts such as logs, pickle models, and caches are ignored by Git.
+
+### Безпечний запуск у Docker
+```bash
+cp .env.example .env
+# заповніть ADMIN_AUTH_TOKEN у .env
+docker compose --env-file .env up --build
+```
+
 ### Примітки
 - Серсіс розроблено як безпечний навчальний приклад для роботи з проксі та правилами доступу.
 - Проксі обробляє запити асинхронно і не зберігає великі тіла запитів у пам’яті.
@@ -101,6 +122,27 @@ Open the services at:
 
 ### Configuration
 Settings are stored in config.yaml. You can change the target backend, WAF rules, and request limiting parameters there.
+
+### Security notes
+- The admin panel requires an access token. Set the ADMIN_AUTH_TOKEN environment variable before starting the services, for example: ADMIN_AUTH_TOKEN='your-strong-secret'.
+- For Docker Compose, it is convenient to use a .env file or run the command with `--env-file`.
+- Access the admin UI by sending the X-Admin-Token header or an Authorization: Bearer <token> header.
+- The proxy blocks attempts to forward requests to arbitrary external hosts, and the WAF inspects paths, query strings, bodies, and headers.
+
+### Security checklist
+- [x] Proxy blocks absolute URL targets to avoid SSRF/open-proxy behavior.
+- [x] WAF output escapes attacker-controlled content to prevent reflected XSS.
+- [x] Admin routes require authentication via token.
+- [x] Admin service is exposed only on localhost in Docker Compose.
+- [x] Environment-based secrets are documented via .env and .env.example.
+- [x] Generated artifacts such as logs, pickle models, and caches are ignored by Git.
+
+### Secure Docker run
+```bash
+cp .env.example .env
+# fill in ADMIN_AUTH_TOKEN in .env
+docker compose --env-file .env up --build
+```
 
 ### Notes
 - The service is designed as a safe learning example for working with proxies and access rules.

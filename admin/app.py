@@ -1,8 +1,9 @@
 import json
 import logging
 import os
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse
 from redis.asyncio import Redis
 
@@ -10,7 +11,25 @@ from proxy.config import ConfigManager
 from proxy.model import train_model
 from proxy.rate_limit import get_blocked_ips, get_rate_limit_stats, get_redis_client
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app_instance: FastAPI):
+    await config_manager.initialize()
+    try:
+        global redis_client
+        try:
+            redis_client = get_redis_client(redis_url)
+            await redis_client.ping()
+        except Exception:
+            redis_client = None
+            logging.warning('Redis is unavailable, admin UI will show empty state.')
+        yield
+    finally:
+        await config_manager.shutdown()
+        if redis_client:
+            await redis_client.close()
+
+
+app = FastAPI(lifespan=lifespan)
 
 redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 config_file = os.getenv('CONFIG_FILE', 'config.yaml')
@@ -18,23 +37,35 @@ redis_client: Redis | None = None
 config_manager = ConfigManager(config_file, redis_url=redis_url)
 
 
-@app.on_event('startup')
-async def admin_startup():
-    global redis_client
-    await config_manager.initialize()
-    try:
-        redis_client = get_redis_client(redis_url)
-        await redis_client.ping()
-    except Exception:
-        redis_client = None
-        logging.warning('Redis is unavailable, admin UI will show empty state.')
+def _get_expected_admin_token() -> str | None:
+    return os.getenv('ADMIN_AUTH_TOKEN') or config_manager.config.admin.get('auth_token')
 
 
-@app.on_event('shutdown')
-async def admin_shutdown():
-    await config_manager.shutdown()
-    if redis_client:
-        await redis_client.close()
+def _get_provided_admin_token(request: Request | WebSocket) -> str | None:
+    if isinstance(request, WebSocket):
+        headers = request.headers
+    else:
+        headers = request.headers
+    token = headers.get('x-admin-token')
+    if token:
+        return token
+    auth_header = headers.get('authorization', '')
+    if auth_header.startswith('Bearer '):
+        return auth_header[7:].strip()
+    return None
+
+
+@app.middleware('http')
+async def require_admin_auth(request: Request, call_next):
+    expected_token = _get_expected_admin_token()
+    if not expected_token:
+        return JSONResponse({'detail': 'Admin authentication required'}, status_code=401)
+
+    provided_token = _get_provided_admin_token(request)
+    if provided_token != expected_token:
+        return JSONResponse({'detail': 'Admin authentication required'}, status_code=401)
+
+    return await call_next(request)
 
 
 @app.get('/')
@@ -166,6 +197,11 @@ async def retrain_ml():
 
 @app.websocket('/ws/config')
 async def websocket_config(ws: WebSocket):
+    expected_token = _get_expected_admin_token()
+    if expected_token and _get_provided_admin_token(ws) != expected_token:
+        await ws.accept()
+        await ws.close(code=1008)
+        return
     if not redis_client:
         await ws.accept()
         await ws.close(code=1008)

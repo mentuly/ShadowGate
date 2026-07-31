@@ -1,10 +1,12 @@
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import tempfile
 import time
 import urllib.parse
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
@@ -27,7 +29,24 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name
 logger = logging.getLogger('proxy')
 EVENT_LOG_PATH = Path('logs/proxy-events.jsonl')
 
-app = FastAPI(title='Async Reverse Proxy', version='1.1.0')
+@asynccontextmanager
+async def lifespan(app_instance: FastAPI):
+    await _ensure_runtime_initialized()
+    try:
+        yield
+    finally:
+        await config_manager.shutdown()
+        if redis_client:
+            await redis_client.close()
+        if hasattr(app_instance.state, 'client'):
+            await app_instance.state.client.aclose()
+        if getattr(app_instance.state, 'retrain_task', None):
+            app_instance.state.retrain_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await app_instance.state.retrain_task
+
+
+app = FastAPI(title='Async Reverse Proxy', version='1.1.0', lifespan=lifespan)
 
 config_file = os.getenv('CONFIG_FILE', 'config.yaml')
 redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
@@ -67,21 +86,7 @@ async def _ensure_runtime_initialized() -> None:
         app.state.client = httpx.AsyncClient(timeout=None, follow_redirects=False)
     app.state.runtime_initialized = True
     if config_manager.config.ml.get('enabled', False) and anomaly_model is not None:
-        asyncio.create_task(_retrain_loop())
-
-
-@app.on_event('startup')
-async def startup_event():
-    await _ensure_runtime_initialized()
-
-
-@app.on_event('shutdown')
-async def shutdown_event():
-    await config_manager.shutdown()
-    if redis_client:
-        await redis_client.close()
-    if hasattr(app.state, 'client'):
-        await app.state.client.aclose()
+        app.state.retrain_task = asyncio.create_task(_retrain_loop())
 
 
 async def _retrain_loop() -> None:
@@ -90,7 +95,7 @@ async def _retrain_loop() -> None:
         if not config_manager.config.ml.get('enabled', False) or anomaly_model is None:
             continue
         try:
-            anomaly_model.retrain_if_needed()
+            await asyncio.to_thread(anomaly_model.retrain_if_needed)
         except Exception:
             continue
 
@@ -147,12 +152,25 @@ async def _increment_stat(name: str) -> None:
         return
 
 
+def _build_backend_url(path: str, query_string: str | None = None) -> str:
+    target_base = config_manager.config.target_backend.rstrip('/')
+    parsed_path = urllib.parse.urlsplit(path)
+    if parsed_path.scheme or parsed_path.netloc:
+        raise ValueError('Blocked absolute URL target')
+
+    normalized_path = path.lstrip('/')
+    backend_url = urllib.parse.urljoin(target_base + '/', normalized_path)
+    if query_string:
+        backend_url = f'{backend_url}?{query_string}'
+    return backend_url
+
+
 async def _proxy_request(request: Request, path: str) -> Response:
     await _ensure_runtime_initialized()
-    target_base = config_manager.config.target_backend.rstrip('/')
-    backend_url = urllib.parse.urljoin(target_base + '/', path)
-    if request.url.query:
-        backend_url = f'{backend_url}?{request.url.query}'
+    try:
+        backend_url = _build_backend_url(path, request.url.query)
+    except ValueError:
+        return HTMLResponse('<h1>400 Bad Request</h1><p>Blocked request to an external host.</p>', status_code=status.HTTP_400_BAD_REQUEST)
 
     body_size, body_file = await _read_request_body(request)
     body_text = _read_body_text(body_file)
@@ -187,7 +205,13 @@ async def _proxy_request(request: Request, path: str) -> Response:
             )
 
     if config_manager.config.waf.get('enabled', False):
-        waf_result = scan_request_components(request.url.path, request.url.query, body_text, config_manager.config.waf['rules'])
+        waf_result = scan_request_components(
+            request.url.path,
+            request.url.query,
+            body_text,
+            config_manager.config.waf['rules'],
+            headers=dict(request.headers),
+        )
         if waf_result:
             rule_name, _, details = waf_result
             _append_event_log({'event': 'waf_block', 'rule': rule_name, 'details': details, 'path': request.url.path, 'client_ip': client_ip})
@@ -284,7 +308,7 @@ def _build_backend_ws_url(path: str, query_string: str | None = None) -> str:
         ws_base = 'ws://' + target_base[len('http://'):]
     else:
         ws_base = target_base
-    ws_url = urllib.parse.urljoin(ws_base + '/', path)
+    ws_url = urllib.parse.urljoin(ws_base + '/', path.lstrip('/'))
     if query_string:
         ws_url = f'{ws_url}?{query_string}'
     return ws_url
