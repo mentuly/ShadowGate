@@ -1,149 +1,109 @@
 # Async Reverse Proxy with Security Controls
 
-> Ukrainian / English
->
-> [Українська](#-українська) · [English](#-english)
+A secure reverse-proxy project built with Python, FastAPI, Redis, and Docker. It forwards requests to a configured backend while applying WAF checks, rate limiting, request anomaly scoring, and admin protection.
 
-## 🇺🇦 Українська
+## Features
 
-### Огляд
-Цей проєкт — демонстраційний сервіс для маршрутизації HTTP-запитів через reverse proxy з базовими механізмами безпеки. Він підходить для навчання, тестування або як простий приклад архітектури з проксі, WAF, обмеженням частоти запитів і адміністративною панеллю.
+- HTTP and WebSocket proxying with SSRF protections
+- strict backend allowlist for allowed destinations
+- WAF inspection for path, query, body, and header payloads
+- rate limiting with Redis-backed state
+- anomaly detection for suspicious traffic patterns
+- admin dashboard for runtime rule toggling
+- request ID and structured logging for operations visibility
+- Docker-based deployment with a non-root runtime user
 
-### Основні можливості
-- приймає вхідні HTTP-запити від клієнтів;
-- пересилає їх на обраний бекенд-сервіс;
-- застосовує правила WAF для блокування підозрілих запитів;
-- обмежує кількість запитів від одного джерела;
-- відстежує репутацію IP-адрес;
-- веде журнали подій і дозволяє керувати правилами через admin UI.
+## Architecture
 
-### Як це працює
-1. Клієнт надсилає запит на проксі.
-2. Проксі перевіряє запит на підозрілі шаблони.
-3. Якщо запит допустимий, він пересилається на бекенд.
-4. Під час обробки фіксуються події, а правила можна змінювати без перезапуску сервісу.
+- proxy service: handles inbound traffic and forwards to the configured backend
+- admin service: exposes management endpoints and the admin UI
+- Redis: stores rate-limit state, runtime overrides, and operational metadata
+- config.yaml: runtime configuration for backend, allowlist, WAF, admin, and ML settings
 
-### Захист сервісу
-Проєкт має кілька рівнів захисту:
-- WAF — перевіряє вхідні дані та блокує небажані шаблони;
-- rate limiting — зменшує навантаження від надмірної активності з одного джерела;
-- IP reputation — дозволяє відстежувати повторювану підозрілу поведінку;
-- логування — зберігає інформацію про події для аналізу;
-- адміністративна панель — дає змогу керувати правилами в процесі роботи.
+## Quick start
 
-### Технології
-- Python
-- FastAPI
-- Redis
-- Docker / Docker Compose
+### Prerequisites
 
-### Швидкий старт
+- Python 3.11+
+- Redis running locally or via Docker Compose
+- Docker and Docker Compose (optional)
+
+### Local development
+
 ```bash
-docker compose build
-docker compose up
+python -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+export ADMIN_AUTH_TOKEN=your-strong-secret
+export REDIS_URL=redis://localhost:6379/0
+uvicorn proxy.app:app --host 0.0.0.0 --port 8000
 ```
 
-Відкрийте:
-- Proxy: http://localhost:8000
-- Admin UI: http://localhost:8080
+Then access:
 
-### Конфігурація
-Налаштування зберігаються у файлі config.yaml. Там можна змінити цільовий бекенд, правила WAF і параметри обмеження запитів.
+- proxy: http://localhost:8000
+- admin UI: http://localhost:8080
 
-### Безпека
-- Адмін-панель вимагає токен доступу. Встановіть змінну середовища ADMIN_AUTH_TOKEN перед запуском сервісу, наприклад: ADMIN_AUTH_TOKEN='ваш-сильний-секрет'.
-- Для Docker Compose зручно використовувати файл .env або запускати команду з `--env-file`.
-- Для доступу до admin UI використовуйте заголовок X-Admin-Token або Authorization: Bearer <token>.
-- Проксі блокує спроби відправити запит на довільний зовнішній хост, а WAF перевіряє шлях, query, body і заголовки.
+### Docker Compose
 
-### Security checklist
-- [x] Proxy blocks absolute URL targets to avoid SSRF/open-proxy behavior.
-- [x] WAF output escapes attacker-controlled content to prevent reflected XSS.
-- [x] Admin routes require authentication via token.
-- [x] Admin service is exposed only on localhost in Docker Compose.
-- [x] Environment-based secrets are documented via .env and .env.example.
-- [x] Generated artifacts such as logs, pickle models, and caches are ignored by Git.
-
-### Безпечний запуск у Docker
 ```bash
 cp .env.example .env
-# заповніть ADMIN_AUTH_TOKEN у .env
+# fill ADMIN_AUTH_TOKEN in .env
 docker compose --env-file .env up --build
 ```
 
-### Примітки
-- Серсіс розроблено як безпечний навчальний приклад для роботи з проксі та правилами доступу.
-- Проксі обробляє запити асинхронно і не зберігає великі тіла запитів у пам’яті.
+## Configuration
 
----
+The project loads settings from config.yaml and supports environment overrides such as:
 
-## 🇬🇧 English
+- PROXY_TARGET / TARGET_BACKEND
+- REDIS_URL
+- ADMIN_AUTH_TOKEN
+- SSRF_ALLOWLIST
+- WAF_ENABLED
+- RATE_LIMIT_ENABLED
+- ML_ENABLED
+- LOG_LEVEL
 
-### Overview
-This project is a demonstration service for routing HTTP traffic through a reverse proxy with basic security controls. It is suitable for learning, testing, or as a simple example of an architecture that includes a proxy, WAF, rate limiting, and an administrative interface.
+See config.yaml for the default runtime configuration.
 
-### Key features
-- accepts incoming HTTP requests from clients;
-- forwards them to a selected backend service;
-- applies WAF rules to block suspicious requests;
-- limits the number of requests coming from a single source;
-- tracks IP reputation;
-- records events and allows rules to be managed through the admin UI.
+## Security model
 
-### How it works
-1. A client sends a request to the proxy.
-2. The proxy checks the request for suspicious patterns.
-3. If the request is allowed, it is forwarded to the backend.
-4. Events are logged during processing, and rules can be changed without restarting the service.
+The project is designed to reduce common proxy and admin risks:
 
-### Security model
-The project includes several layers of protection:
-- WAF — inspects incoming traffic and blocks suspicious patterns;
-- rate limiting — reduces pressure from excessive activity from a single source;
-- IP reputation — helps track repeated suspicious behavior;
-- logging — stores event information for review and analysis;
-- admin panel — allows rule management while the service is running.
+- rejects absolute URLs and double-slash SSRF patterns
+- blocks external backend destinations unless explicitly allowed
+- strips unsafe upstream headers and validates backend targets
+- enforces admin authentication on protected routes
+- adds CSRF validation for state-changing admin actions
+- caps request body size to avoid oversized payload abuse
+- records security events and request metadata for review
 
-### Technologies
-- Python
-- FastAPI
-- Redis
-- Docker / Docker Compose
+## Observability
 
-### Quick start
+The proxy emits structured logs and supports per-request IDs for operational tracing. The runtime metrics endpoint is available at:
+
+- /metrics
+- /health
+- /livez
+- /readyz
+
+## Testing
+
 ```bash
-docker compose build
-docker compose up
+pytest -q
 ```
 
-Open the services at:
-- Proxy: http://localhost:8000
-- Admin UI: http://localhost:8080
+The current regression suite covers:
 
-### Configuration
-Settings are stored in config.yaml. You can change the target backend, WAF rules, and request limiting parameters there.
+- proxy forwarding
+- WAF blocking
+- SSRF bypass prevention
+- admin auth checks
+- browser-style admin cookie flow
+- rate-limit handling
+- anomaly scoring
 
-### Security notes
-- The admin panel requires an access token. Set the ADMIN_AUTH_TOKEN environment variable before starting the services, for example: ADMIN_AUTH_TOKEN='your-strong-secret'.
-- For Docker Compose, it is convenient to use a .env file or run the command with `--env-file`.
-- Access the admin UI by sending the X-Admin-Token header or an Authorization: Bearer <token> header.
-- The proxy blocks attempts to forward requests to arbitrary external hosts, and the WAF inspects paths, query strings, bodies, and headers.
+## Notes
 
-### Security checklist
-- [x] Proxy blocks absolute URL targets to avoid SSRF/open-proxy behavior.
-- [x] WAF output escapes attacker-controlled content to prevent reflected XSS.
-- [x] Admin routes require authentication via token.
-- [x] Admin service is exposed only on localhost in Docker Compose.
-- [x] Environment-based secrets are documented via .env and .env.example.
-- [x] Generated artifacts such as logs, pickle models, and caches are ignored by Git.
-
-### Secure Docker run
-```bash
-cp .env.example .env
-# fill in ADMIN_AUTH_TOKEN in .env
-docker compose --env-file .env up --build
-```
-
-### Notes
-- The service is designed as a safe learning example for working with proxies and access rules.
-- The proxy handles requests asynchronously and does not buffer large request bodies in memory.
+This project is intended as a hardened example of a reverse proxy with security controls and operational safeguards, not as a substitute for a full enterprise edge-gateway stack. It is suitable for local deployment, demos, and security-focused testing.

@@ -1,3 +1,4 @@
+import asyncio
 import importlib
 import os
 import sys
@@ -6,12 +7,16 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import httpx
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from proxy import app as proxy_app_module
 from proxy.app import app, config_manager
+from proxy.model import AnomalyModel
+from proxy.rate_limit import evaluate_request
 from proxy.waf import scan_request_components
 
 
@@ -76,6 +81,21 @@ def test_proxy_rejects_absolute_url_targets():
     assert 'blocked' in response.text.lower()
 
 
+def test_proxy_rejects_double_slash_ssrf_bypass():
+    os.environ['PROXY_TARGET'] = 'http://127.0.0.1:1'
+    os.environ['WAF_ENABLED'] = 'false'
+    config_manager.reload_from_file()
+    with pytest.raises(ValueError):
+        proxy_app_module._build_backend_url('//http://example.com/', raw_path=b'//http://example.com/')
+
+
+def test_proxy_rejects_websocket_ssrf_targets():
+    os.environ['PROXY_TARGET'] = 'http://127.0.0.1:1'
+    config_manager.reload_from_file()
+    with pytest.raises(ValueError):
+        proxy_app_module._build_backend_ws_url('//http://example.com', raw_path=b'//http://example.com')
+
+
 def test_admin_requires_authentication():
     os.environ['ADMIN_AUTH_TOKEN'] = 'test-token'
     import admin.app as admin_app_module
@@ -84,6 +104,47 @@ def test_admin_requires_authentication():
     assert response.status_code == 401
     auth_response = _make_request(admin_app_module.app, 'GET', '/', headers={'X-Admin-Token': 'test-token'})
     assert auth_response.status_code == 200
+
+
+def test_admin_accepts_browser_style_auth_cookie_after_login():
+    os.environ['ADMIN_AUTH_TOKEN'] = 'test-token'
+    import admin.app as admin_app_module
+    admin_app_module = importlib.reload(admin_app_module)
+    response = _make_request(admin_app_module.app, 'GET', '/', headers={'X-Admin-Token': 'test-token'})
+    assert response.status_code == 200
+    assert 'Set-Cookie' in response.headers
+
+
+def test_rate_limit_uses_lua_script_result():
+    class FakeRedis:
+        async def eval(self, *args, **kwargs):
+            return ('block', '123')
+
+    async def _run():
+        return await evaluate_request(
+            FakeRedis(),
+            '127.0.0.1',
+            {'capacity': 10, 'refill_rate': 1.0, 'cost_per_request': 1, 'block_threshold': 3,
+             'suspicious_threshold': 10, 'suspicious_score': 1, 'block_duration_seconds': 300,
+             'grace_requests': 2},
+        )
+
+    status, meta = asyncio.run(_run())
+    assert status == 'block'
+    assert meta['value'] == '123'
+
+
+def test_ml_model_scores_anomalous_request():
+    class FakeModel:
+        def decision_function(self, vectors):
+            return [0.2]
+
+    model = AnomalyModel(threshold=0.5)
+    model.model = FakeModel()
+    features = {'path_length': 200, 'header_count': 5, 'body_size': 1000, 'frequency': 10, 'user_agent': 'bot'}
+    score = model.score_request(features)
+    assert score is not None
+    assert model.is_anomalous(score)
 
 
 def test_waf_detects_obfuscated_sql_and_headers():

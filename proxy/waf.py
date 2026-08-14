@@ -7,27 +7,44 @@ import urllib.parse
 def _normalize_text(value: str) -> str:
     if not value:
         return ''
-    text = value
-    for _ in range(4):
+    text = str(value)
+    for _ in range(6):
         decoded = urllib.parse.unquote(text)
         if decoded == text:
             break
         text = decoded
-    return text.replace('+', ' ')
+    text = html.unescape(text)
+    text = text.replace('+', ' ')
+    text = re.sub(r'[\x00-\x20]+', ' ', text)
+    return text.lower()
 
 
 WAF_PATTERNS = {
     'sql_injection': re.compile(
-        r"(?i)(?:\b(select|union|insert|update|delete|drop|alter|create|from|where)\b|--|;|\b(or|and)\b\s+\w+\s*=\s*\w+|\bexec\b|\bscript\b|\binformation_schema\b|\bbenchmark\b|/\*|\*/)",
+        r"(?i)(?:\b(?:select|union|insert|update|delete|drop|alter|create|from|where|information_schema|benchmark|exec)\b|--|;|\b(?:or|and)\b\s+\w+\s*=\s*\w+|/\*|\*/)",
         re.MULTILINE,
     ),
     'xss': re.compile(
-        r"(?i)(?:<script|<img|javascript:|onerror=|onload=|document\.cookie|<iframe|<svg|<body|<link|expression\s*\(|<style|<meta|<object|<embed)",
+        r"(?i)(?:<script|<img|javascript:|onerror=|onload=|document\.cookie|<iframe|<svg|<body|<link|expression\s*\(|<style|<meta|<object|<embed|srcdoc|vbscript:)",
         re.MULTILINE,
     ),
     'path_traversal': re.compile(
-        r"(?i)(?:\.\./|\.\\|/etc/passwd|/proc/self|%2e%2e|%2f|%5c|\\x2e\\x2e|\\0|/windows/win.ini)",
+        r"(?i)(?:\.\./|\.\\|/etc/passwd|/proc/self|%2e%2e|%2f|%5c|\\x2e\\x2e|\\0|/windows/win.ini|\.\.|/\.\.)",
         re.MULTILINE,
+    ),
+}
+
+WAF_LITERAL_RULES = {
+    'sql_injection': (
+        'select ', 'union ', 'insert ', 'update ', 'delete ', 'drop ', 'alter ', 'create ', 'from ', 'where ',
+        'information_schema', 'benchmark(', 'exec ', 'or 1=1', '--', '/*', '*/', ';'
+    ),
+    'xss': (
+        '<script', 'javascript:', 'onerror=', 'onload=', 'document.cookie', '<iframe', '<svg', '<body',
+        '<img', '<meta', 'srcdoc', 'vbscript:'
+    ),
+    'path_traversal': (
+        '../', '..\\', '/etc/passwd', '/proc/self', '/windows/win.ini', '%2e%2e', '%2f', '\\x2e\\x2e', '\\0'
     ),
 }
 
@@ -43,6 +60,8 @@ def scan_request_components(path: str, query: str, body_text: str, enabled_rules
     for name, pattern in WAF_PATTERNS.items():
         if not enabled_rules.get(name, False):
             continue
+        if any(marker in combined for marker in WAF_LITERAL_RULES[name]):
+            return True, name, {'matched': [marker for marker in WAF_LITERAL_RULES[name] if marker in combined][:10], 'sample': combined[:400]}
         if pattern.search(combined):
             return True, name, {'matched': pattern.pattern, 'sample': combined[:400]}
     return None

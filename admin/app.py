@@ -42,17 +42,24 @@ def _get_expected_admin_token() -> str | None:
 
 
 def _get_provided_admin_token(request: Request | WebSocket) -> str | None:
-    if isinstance(request, WebSocket):
-        headers = request.headers
-    else:
-        headers = request.headers
+    headers = request.headers
     token = headers.get('x-admin-token')
     if token:
         return token
     auth_header = headers.get('authorization', '')
     if auth_header.startswith('Bearer '):
         return auth_header[7:].strip()
+    cookie_token = request.cookies.get('admin_token') if not isinstance(request, WebSocket) else request.cookies.get('admin_token')
+    if cookie_token:
+        return cookie_token
     return None
+
+
+def _get_provided_csrf_token(request: Request) -> str | None:
+    token = request.headers.get('x-csrf-token')
+    if token:
+        return token
+    return request.cookies.get('admin_csrf')
 
 
 @app.middleware('http')
@@ -65,7 +72,16 @@ async def require_admin_auth(request: Request, call_next):
     if provided_token != expected_token:
         return JSONResponse({'detail': 'Admin authentication required'}, status_code=401)
 
-    return await call_next(request)
+    if request.method != 'GET':
+        csrf_token = _get_provided_csrf_token(request)
+        if not csrf_token or csrf_token != request.cookies.get('admin_csrf'):
+            return JSONResponse({'detail': 'Invalid CSRF token'}, status_code=403)
+
+    response = await call_next(request)
+    if request.url.path == '/' and request.method == 'GET':
+        response.set_cookie('admin_token', expected_token, httponly=True, samesite='lax')
+        response.set_cookie('admin_csrf', os.urandom(16).hex(), httponly=False, samesite='lax')
+    return response
 
 
 @app.get('/')
@@ -96,10 +112,29 @@ async def index():
     <div id="activity"></div>
   </div>
   <script>
-    async function fetchJson(path) {
-      const res = await fetch(path);
+    function getCookie(name) {
+      const value = `; ${document.cookie}`;
+      const parts = value.split(`; ${name}=`);
+      if (parts.length === 2) return parts.pop().split(';').shift();
+      return null;
+    }
+
+    function csrfHeaders() {
+      const token = getCookie('admin_csrf');
+      return token ? { 'X-CSRF-Token': token } : {};
+    }
+
+    async function fetchJson(path, options = {}) {
+      const res = await fetch(path, {
+        ...options,
+        headers: {
+          ...csrfHeaders(),
+          ...(options.headers || {}),
+        },
+      });
       return await res.json();
     }
+
     async function refresh() {
       const rules = await fetchJson('/api/rules');
       const rulesDiv = document.getElementById('rules');
@@ -108,7 +143,7 @@ async def index():
         const btn = document.createElement('button');
         btn.textContent = enabled ? 'Disable' : 'Enable';
         btn.onclick = async () => {
-          await fetch(`/api/rules/${name}/toggle`, { method: 'POST' });
+          await fetch(`/api/rules/${name}/toggle`, { method: 'POST', headers: csrfHeaders() });
           refresh();
         };
         const item = document.createElement('div');
@@ -121,7 +156,7 @@ async def index():
       blockedDiv.innerHTML = blocked.map(item => `<div>${item.ip} — score ${item.score}</div>`).join('') || '<div>No blocked IPs</div>';
       const stats = await fetchJson('/api/stats');
       const statsDiv = document.getElementById('stats');
-      statsDiv.innerHTML = `<div>Request count: ${stats.request_count}</div><div>Anomaly blocks: ${stats.anomaly_count}</div><div>Suspicious IPs: ${stats.suspicious_ips}</div><div>Blocked IPs: ${stats.blocked_ips}</div><button onclick="fetch('/api/ml/retrain', {method:'POST'}).then(() => refresh())">Retrain ML model</button>`;
+      statsDiv.innerHTML = `<div>Request count: ${stats.request_count}</div><div>Anomaly blocks: ${stats.anomaly_count}</div><div>Suspicious IPs: ${stats.suspicious_ips}</div><div>Blocked IPs: ${stats.blocked_ips}</div><button onclick="fetch('/api/ml/retrain', {method:'POST', headers: csrfHeaders()}).then(() => refresh())">Retrain ML model</button>`;
       const activity = await fetchJson('/api/activity');
       const activityDiv = document.getElementById('activity');
       activityDiv.innerHTML = activity.map(item => `<div>${item.timestamp}: ${item.event} :: ${item.path || '-'} :: ${item.client_ip || '-'}</div>`).join('') || '<div>No recent activity</div>';
@@ -198,10 +233,12 @@ async def retrain_ml():
 @app.websocket('/ws/config')
 async def websocket_config(ws: WebSocket):
     expected_token = _get_expected_admin_token()
-    if expected_token and _get_provided_admin_token(ws) != expected_token:
-        await ws.accept()
-        await ws.close(code=1008)
-        return
+    if expected_token:
+        provided_token = _get_provided_admin_token(ws)
+        if provided_token != expected_token:
+            await ws.accept()
+            await ws.close(code=1008)
+            return
     if not redis_client:
         await ws.accept()
         await ws.close(code=1008)

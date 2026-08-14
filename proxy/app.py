@@ -3,10 +3,13 @@ import contextlib
 import json
 import logging
 import os
+import re
 import tempfile
 import time
 import urllib.parse
+import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -28,6 +31,16 @@ def get_env(name: str, default: str | None = None) -> str:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
 logger = logging.getLogger('proxy')
 EVENT_LOG_PATH = Path('logs/proxy-events.jsonl')
+MAX_REQUEST_BODY_BYTES = 1_000_000
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec='seconds')
+
+
+def _log_event(event: str, **context) -> None:
+    payload = {'event': event, 'timestamp': _now_iso(), **context}
+    logger.info(json.dumps(payload, default=str, ensure_ascii=False))
 
 @asynccontextmanager
 async def lifespan(app_instance: FastAPI):
@@ -53,6 +66,19 @@ redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 config_manager = ConfigManager(config_file, redis_url=redis_url)
 redis_client: Redis | None = None
 anomaly_model: AnomalyModel | None = None
+
+
+@app.middleware('http')
+async def request_id_middleware(request: Request, call_next):
+    if config_manager.config.observability.get('enable_request_id', True):
+        request_id = request.headers.get('x-request-id') or uuid.uuid4().hex
+        request.state.request_id = request_id
+    else:
+        request.state.request_id = None
+    response = await call_next(request)
+    if request.state.request_id is not None:
+        response.headers['X-Request-ID'] = request.state.request_id
+    return response
 
 
 class TempFileByteStream(httpx.AsyncByteStream):
@@ -106,14 +132,20 @@ def _append_event_log(event: dict) -> None:
         handle.write(json.dumps(event, ensure_ascii=False) + '\n')
 
 
-async def _read_request_body(request: Request, max_memory_size: int = 65536) -> tuple[int, tempfile.SpooledTemporaryFile]:
+async def _read_request_body(request: Request, max_memory_size: int = 65536, max_total_size: int = MAX_REQUEST_BODY_BYTES) -> tuple[int, tempfile.SpooledTemporaryFile]:
     body_file = tempfile.SpooledTemporaryFile(max_size=max_memory_size)
     total_size = 0
-    async for chunk in request.stream():
-        if not chunk:
-            continue
-        total_size += len(chunk)
-        body_file.write(chunk)
+    try:
+        async for chunk in request.stream():
+            if not chunk:
+                continue
+            total_size += len(chunk)
+            if total_size > max_total_size:
+                raise ValueError(f'Request body exceeds the maximum allowed size of {max_total_size} bytes.')
+            body_file.write(chunk)
+    except ValueError:
+        body_file.close()
+        raise
     body_file.seek(0)
     return total_size, body_file
 
@@ -152,14 +184,46 @@ async def _increment_stat(name: str) -> None:
         return
 
 
-def _build_backend_url(path: str, query_string: str | None = None) -> str:
+def _matches_allowlist(hostname: str | None, allowlist: list[str]) -> bool:
+    if not hostname:
+        return False
+    hostname = hostname.lower().strip().rstrip('.')
+    for allowed in allowlist:
+        allowed = allowed.lower().strip().rstrip('.')
+        if not allowed:
+            continue
+        if hostname == allowed or hostname.endswith(f'.{allowed}'):
+            return True
+    return False
+
+
+def _build_backend_url(path: str, query_string: str | None = None, raw_path: bytes | str | None = None) -> str:
     target_base = config_manager.config.target_backend.rstrip('/')
-    parsed_path = urllib.parse.urlsplit(path)
+    candidate_path = path.strip()
+    if raw_path:
+        raw_candidate = raw_path.decode('utf-8', 'surrogateescape') if isinstance(raw_path, (bytes, bytearray)) else str(raw_path)
+        if raw_candidate.startswith('//'):
+            raise ValueError('Blocked absolute URL target')
+        raw_candidate = urllib.parse.unquote(raw_candidate)
+        if raw_candidate.startswith('//'):
+            raise ValueError('Blocked absolute URL target')
+        if re.match(r'^/{2,}[a-zA-Z][a-zA-Z0-9+.-]*://', raw_candidate):
+            raise ValueError('Blocked absolute URL target')
+    if not candidate_path:
+        candidate_path = '/'
+    if candidate_path.startswith('//'):
+        raise ValueError('Blocked absolute URL target')
+    parsed_path = urllib.parse.urlsplit(candidate_path)
     if parsed_path.scheme or parsed_path.netloc:
         raise ValueError('Blocked absolute URL target')
-
-    normalized_path = path.lstrip('/')
-    backend_url = urllib.parse.urljoin(target_base + '/', normalized_path)
+    candidate_path = candidate_path.lstrip('/')
+    if re.match(r'^[a-zA-Z][a-zA-Z0-9+.-]*://', candidate_path):
+        raise ValueError('Blocked absolute URL target')
+    backend_url = urllib.parse.urljoin(target_base + '/', candidate_path)
+    parsed_backend = urllib.parse.urlsplit(backend_url)
+    allowlist = [item.strip() for item in config_manager.config.ssrf_allowlist if item and item.strip()]
+    if allowlist and not _matches_allowlist(parsed_backend.hostname, allowlist):
+        raise ValueError('Blocked absolute URL target')
     if query_string:
         backend_url = f'{backend_url}?{query_string}'
     return backend_url
@@ -168,11 +232,14 @@ def _build_backend_url(path: str, query_string: str | None = None) -> str:
 async def _proxy_request(request: Request, path: str) -> Response:
     await _ensure_runtime_initialized()
     try:
-        backend_url = _build_backend_url(path, request.url.query)
+        backend_url = _build_backend_url(path, request.url.query, request.scope.get('raw_path'))
     except ValueError:
         return HTMLResponse('<h1>400 Bad Request</h1><p>Blocked request to an external host.</p>', status_code=status.HTTP_400_BAD_REQUEST)
 
-    body_size, body_file = await _read_request_body(request)
+    try:
+        body_size, body_file = await _read_request_body(request)
+    except ValueError as exc:
+        return HTMLResponse(f'<h1>413 Payload Too Large</h1><p>{exc}</p>', status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
     body_text = _read_body_text(body_file)
 
     client_ip = request.client.host if request.client else 'unknown'
@@ -193,7 +260,15 @@ async def _proxy_request(request: Request, path: str) -> Response:
     }
     log_request_features(features)
     _append_event_log({'event': 'request', **features})
-    logger.info('request', extra={'request': json.dumps(features)})
+    _log_event(
+        'proxy_request',
+        request_id=getattr(request.state, 'request_id', None),
+        method=request.method,
+        path=request.url.path,
+        client_ip=client_ip,
+        status='accepted',
+        body_size=body_size,
+    )
 
     if config_manager.config.ml.get('enabled', False) and anomaly_model is not None:
         score = anomaly_model.score_request(features)
@@ -215,7 +290,14 @@ async def _proxy_request(request: Request, path: str) -> Response:
         if waf_result:
             rule_name, _, details = waf_result
             _append_event_log({'event': 'waf_block', 'rule': rule_name, 'details': details, 'path': request.url.path, 'client_ip': client_ip})
-            logger.warning('waf_block', extra={'rule': rule_name, 'details': details, 'path': request.url.path})
+            _log_event(
+                'waf_block',
+                request_id=getattr(request.state, 'request_id', None),
+                rule=rule_name,
+                details=details,
+                path=request.url.path,
+                client_ip=client_ip,
+            )
             page = render_blocked_page(rule_name, details)
             return HTMLResponse(page, status_code=status.HTTP_403_FORBIDDEN)
 
@@ -291,6 +373,8 @@ async def metrics() -> Response:
         'rate_limit_enabled': config_manager.config.rate_limit.get('enabled', False),
         'ml_enabled': config_manager.config.ml.get('enabled', False),
         'redis_available': redis_client is not None,
+        'log_level': config_manager.config.observability.get('log_level', 'INFO'),
+        'request_id_header': 'x-request-id',
     }
     return JSONResponse(payload)
 
@@ -300,15 +384,39 @@ async def proxy(request: Request, path: str) -> Response:
     return await _proxy_request(request, path)
 
 
-def _build_backend_ws_url(path: str, query_string: str | None = None) -> str:
+def _build_backend_ws_url(path: str, query_string: str | None = None, raw_path: bytes | str | None = None) -> str:
     target_base = config_manager.config.target_backend.rstrip('/')
+    candidate_path = path.strip()
+    if raw_path:
+        raw_candidate = raw_path.decode('utf-8', 'surrogateescape') if isinstance(raw_path, (bytes, bytearray)) else str(raw_path)
+        if raw_candidate.startswith('//'):
+            raise ValueError('Blocked absolute URL target')
+        raw_candidate = urllib.parse.unquote(raw_candidate)
+        if raw_candidate.startswith('//'):
+            raise ValueError('Blocked absolute URL target')
+        if re.match(r'^/{2,}[a-zA-Z][a-zA-Z0-9+.-]*://', raw_candidate):
+            raise ValueError('Blocked absolute URL target')
+    if not candidate_path:
+        candidate_path = '/'
+    if candidate_path.startswith('//'):
+        raise ValueError('Blocked absolute URL target')
+    parsed_path = urllib.parse.urlsplit(candidate_path)
+    if parsed_path.scheme or parsed_path.netloc:
+        raise ValueError('Blocked absolute URL target')
+    candidate_path = candidate_path.lstrip('/')
+    if re.match(r'^[a-zA-Z][a-zA-Z0-9+.-]*://', candidate_path):
+        raise ValueError('Blocked absolute URL target')
     if target_base.startswith('https://'):
         ws_base = 'wss://' + target_base[len('https://'):]
     elif target_base.startswith('http://'):
         ws_base = 'ws://' + target_base[len('http://'):]
     else:
         ws_base = target_base
-    ws_url = urllib.parse.urljoin(ws_base + '/', path.lstrip('/'))
+    ws_url = urllib.parse.urljoin(ws_base + '/', candidate_path)
+    parsed_ws = urllib.parse.urlsplit(ws_url)
+    allowlist = [item.strip() for item in config_manager.config.ssrf_allowlist if item and item.strip()]
+    if allowlist and not _matches_allowlist(parsed_ws.hostname, allowlist):
+        raise ValueError('Blocked absolute URL target')
     if query_string:
         ws_url = f'{ws_url}?{query_string}'
     return ws_url
@@ -317,7 +425,11 @@ def _build_backend_ws_url(path: str, query_string: str | None = None) -> str:
 @app.websocket('/ws/{full_path:path}')
 async def websocket_proxy(full_path: str, websocket: WebSocket):
     query_string = websocket.scope.get('query_string', b'').decode('utf-8')
-    backend_url = _build_backend_ws_url(full_path, query_string)
+    try:
+        backend_url = _build_backend_ws_url(full_path, query_string, websocket.scope.get('raw_path'))
+    except ValueError:
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
 
     async def forward_client_to_backend(ws):

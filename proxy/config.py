@@ -11,6 +11,11 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 
 DEFAULT_CONFIG = {
     'target_backend': 'http://httpbin.org',
+    'ssrf_allowlist': ['httpbin.org', 'localhost', '127.0.0.1', '::1'],
+    'observability': {
+        'log_level': 'INFO',
+        'enable_request_id': True,
+    },
     'waf': {
         'enabled': True,
         'rules': {
@@ -44,6 +49,8 @@ DEFAULT_CONFIG = {
 @dataclass
 class ProxyConfig:
     target_backend: str
+    ssrf_allowlist: list[str] = field(default_factory=list)
+    observability: dict = field(default_factory=dict)
     waf: dict = field(default_factory=dict)
     rate_limit: dict = field(default_factory=dict)
     ml: dict = field(default_factory=dict)
@@ -73,6 +80,12 @@ class ConfigManager:
     def _apply_env_overrides(self, merged: dict) -> None:
         if os.getenv('PROXY_TARGET') or os.getenv('TARGET_BACKEND'):
             merged['target_backend'] = os.getenv('PROXY_TARGET') or os.getenv('TARGET_BACKEND')
+        if os.getenv('SSRF_ALLOWLIST') is not None:
+            merged['ssrf_allowlist'] = [item.strip() for item in os.getenv('SSRF_ALLOWLIST', '').split(',') if item.strip()]
+        if os.getenv('LOG_LEVEL') is not None:
+            merged['observability']['log_level'] = os.getenv('LOG_LEVEL', 'INFO').upper()
+        if os.getenv('ENABLE_REQUEST_ID') is not None:
+            merged['observability']['enable_request_id'] = os.getenv('ENABLE_REQUEST_ID', 'true').lower() in {'1', 'true', 'yes', 'on'}
         if os.getenv('WAF_ENABLED') is not None:
             merged['waf']['enabled'] = os.getenv('WAF_ENABLED', 'true').lower() in {'1', 'true', 'yes', 'on'}
         if os.getenv('RATE_LIMIT_ENABLED') is not None:
@@ -89,6 +102,8 @@ class ConfigManager:
         else:
             raw = {}
         merged = {**DEFAULT_CONFIG, **raw}
+        merged['ssrf_allowlist'] = list(DEFAULT_CONFIG['ssrf_allowlist']) + list(raw.get('ssrf_allowlist', []))
+        merged['observability'] = {**DEFAULT_CONFIG['observability'], **raw.get('observability', {})}
         merged['waf'] = {**DEFAULT_CONFIG['waf'], **raw.get('waf', {})}
         merged['waf']['rules'] = {**DEFAULT_CONFIG['waf']['rules'], **raw.get('waf', {}).get('rules', {})}
         merged['rate_limit'] = {**DEFAULT_CONFIG['rate_limit'], **raw.get('rate_limit', {})}

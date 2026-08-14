@@ -1,4 +1,9 @@
 target_backend: http://httpbin.org
+ssrf_allowlist:
+  - httpbin.org
+  - localhost
+  - 127.0.0.1
+  - '::1'
 
 waf:
   enabled: true
