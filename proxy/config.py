@@ -42,6 +42,9 @@ DEFAULT_CONFIG = {
     'admin': {
         'enabled': True,
         'default_refresh_seconds': 5,
+        # When True, admin cookies are set with Secure=True to avoid sending them over plain HTTP.
+        # Set to False for local HTTP development where HTTPS is not used.
+        'secure_cookies': True,
     },
 }
 

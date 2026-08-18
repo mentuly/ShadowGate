@@ -62,6 +62,26 @@ def _get_provided_csrf_token(request: Request) -> str | None:
     return request.headers.get('x-csrf-token')
 
 
+def _constant_time_compare(a: object, b: object) -> bool:
+    """Compare two values in constant time, handling str and bytes safely.
+
+    HTTP headers may contain raw Latin-1 bytes decoded into Python `str`.
+    Normalize both sides to `bytes` using Latin-1 so comparisons won't raise
+    TypeError for non-ASCII header values and remain constant-time.
+    """
+    if isinstance(a, (bytes, bytearray)):
+        a_bytes = bytes(a)
+    else:
+        a_bytes = str(a).encode('latin-1', errors='surrogateescape')
+
+    if isinstance(b, (bytes, bytearray)):
+        b_bytes = bytes(b)
+    else:
+        b_bytes = str(b).encode('latin-1', errors='surrogateescape')
+
+    return hmac.compare_digest(a_bytes, b_bytes)
+
+
 @app.middleware('http')
 async def require_admin_auth(request: Request, call_next):
     # Respect `admin.enabled` flag from config
@@ -73,19 +93,20 @@ async def require_admin_auth(request: Request, call_next):
         return JSONResponse({'detail': 'Admin authentication required'}, status_code=401)
 
     provided_token = _get_provided_admin_token(request)
-    if not provided_token or not hmac.compare_digest(str(provided_token), str(expected_token)):
+    if not provided_token or not _constant_time_compare(provided_token, expected_token):
         return JSONResponse({'detail': 'Admin authentication required'}, status_code=401)
 
     if request.method != 'GET':
         csrf_token = _get_provided_csrf_token(request)
         cookie = request.cookies.get('admin_csrf')
-        if not csrf_token or not cookie or not hmac.compare_digest(str(csrf_token), str(cookie)):
+        if not csrf_token or not cookie or not _constant_time_compare(csrf_token, cookie):
             return JSONResponse({'detail': 'Invalid CSRF token'}, status_code=403)
 
     response = await call_next(request)
     if request.url.path == '/' and request.method == 'GET':
-        response.set_cookie('admin_token', expected_token, httponly=True, samesite='lax')
-        response.set_cookie('admin_csrf', os.urandom(16).hex(), httponly=False, samesite='lax')
+        secure_flag = config_manager.config.admin.get('secure_cookies', True)
+        response.set_cookie('admin_token', expected_token, httponly=True, samesite='lax', secure=secure_flag)
+        response.set_cookie('admin_csrf', os.urandom(16).hex(), httponly=False, samesite='lax', secure=secure_flag)
     return response
 
 
@@ -141,33 +162,63 @@ async def index():
     }
 
     async function refresh() {
-      const rules = await fetchJson('/api/rules');
-      const rulesDiv = document.getElementById('rules');
-      rulesDiv.innerHTML = '';
-      for (const [name, enabled] of Object.entries(rules)) {
-        const btn = document.createElement('button');
-        btn.textContent = enabled ? 'Disable' : 'Enable';
-        btn.onclick = async () => {
-          await fetch(`/api/rules/${name}/toggle`, { method: 'POST', headers: csrfHeaders() });
-          refresh();
-        };
-        const item = document.createElement('div');
-        item.textContent = name + ': ' + enabled;
-        item.append(' ', btn);
-        rulesDiv.appendChild(item);
-      }
-      const blocked = await fetchJson('/api/blocked_ips');
-      const blockedDiv = document.getElementById('blocked');
-      blockedDiv.innerHTML = blocked.map(item => `<div>${item.ip} — score ${item.score}</div>`).join('') || '<div>No blocked IPs</div>';
-      const stats = await fetchJson('/api/stats');
-      const statsDiv = document.getElementById('stats');
-      statsDiv.innerHTML = `<div>Request count: ${stats.request_count}</div><div>Anomaly blocks: ${stats.anomaly_count}</div><div>Suspicious IPs: ${stats.suspicious_ips}</div><div>Blocked IPs: ${stats.blocked_ips}</div><button onclick="fetch('/api/ml/retrain', {method:'POST', headers: csrfHeaders()}).then(() => refresh())">Retrain ML model</button>`;
-      const activity = await fetchJson('/api/activity');
-      const activityDiv = document.getElementById('activity');
-      activityDiv.innerHTML = activity.map(item => `<div>${item.timestamp}: ${item.event} :: ${item.path || '-'} :: ${item.client_ip || '-'}</div>`).join('') || '<div>No recent activity</div>';
+        const rules = await fetchJson('/api/rules');
+            const rulesDiv = document.getElementById('rules');
+            rulesDiv.innerHTML = '';
+            for (const [name, enabled] of Object.entries(rules)) {
+                const btn = document.createElement('button');
+                btn.textContent = enabled ? 'Disable' : 'Enable';
+                btn.onclick = async () => {
+                    await fetch(`/api/rules/${name}/toggle`, { method: 'POST', headers: csrfHeaders() });
+                    refresh();
+                };
+                const item = document.createElement('div');
+                item.textContent = name + ': ' + enabled;
+                item.append(' ', btn);
+                rulesDiv.appendChild(item);
+            }
+            const blocked = await fetchJson('/api/blocked_ips');
+            const blockedDiv = document.getElementById('blocked');
+            blockedDiv.innerHTML = '';
+            if (!blocked || blocked.length === 0) {
+                const noDiv = document.createElement('div');
+                noDiv.textContent = 'No blocked IPs';
+                blockedDiv.appendChild(noDiv);
+            } else {
+                for (const item of blocked) {
+                    const d = document.createElement('div');
+                    d.textContent = `${item.ip} — score ${item.score}`;
+                    blockedDiv.appendChild(d);
+                }
+            }
+            const stats = await fetchJson('/api/stats');
+            const statsDiv = document.getElementById('stats');
+            statsDiv.innerHTML = '';
+            statsDiv.appendChild(Object.assign(document.createElement('div'), { textContent: `Request count: ${stats.request_count}` }));
+            statsDiv.appendChild(Object.assign(document.createElement('div'), { textContent: `Anomaly blocks: ${stats.anomaly_count}` }));
+            statsDiv.appendChild(Object.assign(document.createElement('div'), { textContent: `Suspicious IPs: ${stats.suspicious_ips}` }));
+            statsDiv.appendChild(Object.assign(document.createElement('div'), { textContent: `Blocked IPs: ${stats.blocked_ips}` }));
+            const retrainBtn = document.createElement('button');
+            retrainBtn.textContent = 'Retrain ML model';
+            retrainBtn.onclick = () => fetch('/api/ml/retrain', { method: 'POST', headers: csrfHeaders() }).then(() => refresh());
+            statsDiv.appendChild(retrainBtn);
+            const activity = await fetchJson('/api/activity');
+            const activityDiv = document.getElementById('activity');
+            activityDiv.innerHTML = '';
+            if (!activity || activity.length === 0) {
+                const noAct = document.createElement('div');
+                noAct.textContent = 'No recent activity';
+                activityDiv.appendChild(noAct);
+            } else {
+                for (const item of activity) {
+                    const a = document.createElement('div');
+                    a.textContent = `${item.timestamp}: ${item.event} :: ${item.path || '-'} :: ${item.client_ip || '-'}`;
+                    activityDiv.appendChild(a);
+                }
+            }
     }
     refresh();
-    const ws = new WebSocket(`ws://${location.host}/ws/config`);
+    const ws = new WebSocket((location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws/config');
     ws.onmessage = () => refresh();
   </script>
 </body>
@@ -246,7 +297,7 @@ async def websocket_config(ws: WebSocket):
     expected_token = _get_expected_admin_token()
     if expected_token:
         provided_token = _get_provided_admin_token(ws)
-        if not provided_token or not hmac.compare_digest(str(provided_token), str(expected_token)):
+        if not provided_token or not _constant_time_compare(provided_token, expected_token):
             await ws.accept()
             await ws.close(code=1008)
             return
