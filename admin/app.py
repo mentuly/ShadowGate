@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import hmac
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, WebSocket
@@ -56,25 +57,29 @@ def _get_provided_admin_token(request: Request | WebSocket) -> str | None:
 
 
 def _get_provided_csrf_token(request: Request) -> str | None:
-    token = request.headers.get('x-csrf-token')
-    if token:
-        return token
-    return request.cookies.get('admin_csrf')
+    # Only accept the CSRF token provided in the request header.
+    # Falling back to the cookie here would make the double-submit protection a no-op.
+    return request.headers.get('x-csrf-token')
 
 
 @app.middleware('http')
 async def require_admin_auth(request: Request, call_next):
+    # Respect `admin.enabled` flag from config
+    if not config_manager.config.admin.get('enabled', True):
+        return JSONResponse({'detail': 'Not found'}, status_code=404)
+
     expected_token = _get_expected_admin_token()
     if not expected_token:
         return JSONResponse({'detail': 'Admin authentication required'}, status_code=401)
 
     provided_token = _get_provided_admin_token(request)
-    if provided_token != expected_token:
+    if not provided_token or not hmac.compare_digest(str(provided_token), str(expected_token)):
         return JSONResponse({'detail': 'Admin authentication required'}, status_code=401)
 
     if request.method != 'GET':
         csrf_token = _get_provided_csrf_token(request)
-        if not csrf_token or csrf_token != request.cookies.get('admin_csrf'):
+        cookie = request.cookies.get('admin_csrf')
+        if not csrf_token or not cookie or not hmac.compare_digest(str(csrf_token), str(cookie)):
             return JSONResponse({'detail': 'Invalid CSRF token'}, status_code=403)
 
     response = await call_next(request)
@@ -232,10 +237,16 @@ async def retrain_ml():
 
 @app.websocket('/ws/config')
 async def websocket_config(ws: WebSocket):
+    # Respect admin.enabled flag for websocket access
+    if not config_manager.config.admin.get('enabled', True):
+        await ws.accept()
+        await ws.close(code=1008)
+        return
+
     expected_token = _get_expected_admin_token()
     if expected_token:
         provided_token = _get_provided_admin_token(ws)
-        if provided_token != expected_token:
+        if not provided_token or not hmac.compare_digest(str(provided_token), str(expected_token)):
             await ws.accept()
             await ws.close(code=1008)
             return

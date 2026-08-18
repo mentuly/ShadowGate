@@ -246,11 +246,14 @@ async def _proxy_request(request: Request, path: str) -> Response:
     frequency = await _get_request_frequency(client_ip)
     await _increment_stat('proxy:request_count')
 
+    # Sanitize path before logging to avoid storing raw input that may contain
+    # script payloads which could later be rendered unsafely in the admin UI.
+    sanitized_path = urllib.parse.quote(request.url.path, safe='/')
     features = {
         'timestamp': time.time(),
         'client_ip': client_ip,
         'method': request.method,
-        'path': request.url.path,
+        'path': sanitized_path,
         'query': request.url.query,
         'path_length': len(request.url.path),
         'header_count': len(request.headers),
@@ -289,7 +292,7 @@ async def _proxy_request(request: Request, path: str) -> Response:
         )
         if waf_result:
             rule_name, _, details = waf_result
-            _append_event_log({'event': 'waf_block', 'rule': rule_name, 'details': details, 'path': request.url.path, 'client_ip': client_ip})
+            _append_event_log({'event': 'waf_block', 'rule': rule_name, 'details': details, 'path': urllib.parse.quote(request.url.path, safe='/'), 'client_ip': client_ip})
             _log_event(
                 'waf_block',
                 request_id=getattr(request.state, 'request_id', None),
