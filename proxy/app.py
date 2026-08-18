@@ -109,7 +109,8 @@ async def _ensure_runtime_initialized() -> None:
         logging.warning('Redis is unavailable, continuing without persistence features.')
     anomaly_model = AnomalyModel(threshold=config_manager.config.ml.get('anomaly_threshold', 0.0))
     if not hasattr(app.state, 'client') or getattr(app.state.client, 'is_closed', False):
-        app.state.client = httpx.AsyncClient(timeout=None, follow_redirects=False)
+        # Use a reasonable timeout for downstream backend requests to avoid hanging
+        app.state.client = httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=30.0), follow_redirects=False)
     app.state.runtime_initialized = True
     if config_manager.config.ml.get('enabled', False) and anomaly_model is not None:
         app.state.retrain_task = asyncio.create_task(_retrain_loop())
@@ -123,6 +124,7 @@ async def _retrain_loop() -> None:
         try:
             await asyncio.to_thread(anomaly_model.retrain_if_needed)
         except Exception:
+            logger.exception('Error during anomaly model retrain')
             continue
 
 
@@ -321,7 +323,8 @@ async def _proxy_request(request: Request, path: str) -> Response:
         backend_response = await app.state.client.send(backend_request, stream=True)
     except RuntimeError as exc:
         if 'closed' in str(exc).lower():
-            app.state.client = httpx.AsyncClient(timeout=None, follow_redirects=False)
+            # Recreate client with timeouts to avoid unbounded waits
+            app.state.client = httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=30.0), follow_redirects=False)
             backend_request = app.state.client.build_request(request.method, backend_url, headers=proxy_headers, content=content)
             backend_response = await app.state.client.send(backend_request, stream=True)
         else:
