@@ -105,7 +105,17 @@ async def require_admin_auth(request: Request, call_next):
     response = await call_next(request)
     if request.url.path == '/' and request.method == 'GET':
         secure_flag = config_manager.config.admin.get('secure_cookies', True)
-        response.set_cookie('admin_token', expected_token, httponly=True, samesite='lax', secure=secure_flag)
+        # Ensure cookie values are safe for latin-1 encoding in Starlette internals.
+        # Environment variables may contain raw bytes decoded with surrogateescape
+        # (e.g. non-ASCII tokens). Convert back to bytes and decode with latin-1
+        # so the resulting str can be encoded to latin-1 without surrogates.
+        try:
+            safe_token = expected_token.encode('latin-1', 'surrogateescape').decode('latin-1')
+        except Exception:
+            # Fallback: coerce to str — may still contain safe ASCII only
+            safe_token = str(expected_token)
+
+        response.set_cookie('admin_token', safe_token, httponly=True, samesite='lax', secure=secure_flag)
         response.set_cookie('admin_csrf', os.urandom(16).hex(), httponly=False, samesite='lax', secure=secure_flag)
     return response
 
