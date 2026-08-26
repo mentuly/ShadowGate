@@ -8,4 +8,12 @@ Jinja2
 python-multipart
 scikit-learn
 pandas
+numpy
+matplotlib
+plotly
+reportlab
 pytest
+pytest-benchmark
+pytest-asyncio
+locust
+requests

@@ -90,19 +90,257 @@ The proxy emits structured logs and supports per-request IDs for operational tra
 
 ## Testing
 
+### Unit & Integration Tests
+
+Run the full test suite:
+
 ```bash
-pytest -q
+pytest -v
 ```
 
-The current regression suite covers:
+Run specific test categories:
 
-- proxy forwarding
-- WAF blocking
-- SSRF bypass prevention
-- admin auth checks
-- browser-style admin cookie flow
-- rate-limit handling
-- anomaly scoring
+```bash
+# Unit/regression tests
+pytest tests/test_proxy.py tests/test_admin_csrf.py -v
+
+# E2E integration tests
+pytest tests/test_integration_e2e.py -v
+
+# Benchmark tests (with latency measurements)
+pytest tests/test_benchmarks.py -v --benchmark-only
+```
+
+The test suite covers:
+
+- **proxy forwarding** — HTTP request forwarding and routing
+- **WAF blocking** — SQL injection, XSS, path traversal detection
+- **SSRF bypass prevention** — URL validation and backend allowlist enforcement
+- **admin auth checks** — authentication and CSRF token validation
+- **rate-limit handling** — token bucket and suspicious score tracking
+- **anomaly scoring** — ML-based request anomaly detection
+- **E2E workflows** — complete user flows through proxy and admin
+- **concurrent requests** — multi-threaded request handling
+- **error handling** — malformed requests and backend failures
+
+### Performance Benchmarks
+
+Run benchmarks to measure latency and throughput:
+
+```bash
+# Run all benchmarks with detailed stats
+pytest tests/test_benchmarks.py --benchmark-only -v
+
+# Run specific benchmark
+pytest tests/test_benchmarks.py::TestProxyBenchmarks::test_simple_get_request --benchmark-only
+
+# Generate benchmark comparison report
+pytest tests/test_benchmarks.py --benchmark-only --benchmark-save=baseline
+pytest tests/test_benchmarks.py --benchmark-only --benchmark-compare=baseline
+```
+
+Benchmarks measure:
+
+- **latency** (p50, p95, p99 percentiles)
+- **throughput** (requests per second)
+- **request sizes** (small, medium, large payloads)
+- **header overhead** (many headers scenario)
+- **WAF scanning time** (normalized request scanning)
+- **rate limit check overhead**
+- **response parsing time** (JSON and text)
+
+### Load Testing with Locust
+
+Load test the proxy under concurrent user traffic:
+
+```bash
+# 1. Start services
+docker-compose up -d
+
+# 2. Run load tests with web UI (visit http://localhost:8089)
+locust -f locustfile.py --host=http://localhost:8000 --web
+
+# Or run headless with predefined load profile
+locust -f locustfile.py --host=http://localhost:8000 --headless -u 100 -r 10 -t 120s
+```
+
+Locust profiles:
+
+| Scenario | Users | Hatch Rate | Duration | Purpose |
+|----------|-------|-----------|----------|---------|
+| **Baseline** | 100 | 10/s | 2m | Normal load testing |
+| **Stress Test** | 1000 | 100/s | 1m | Find breaking point |
+| **Endurance** | 500 | 50/s | 10m | Long-running stability |
+| **High Traffic** | 200 | 20/s | 5m | Rapid request handling |
+| **Data Upload** | 50 | 5/s | 5m | Payload handling |
+
+Run specific scenario:
+
+```bash
+# Stress test
+locust -f locustfile.py --host=http://localhost:8000 --headless \
+  -u 1000 -r 100 -t 60s --csv=reports/stress_test
+
+# High traffic with specific user class
+locust -f locustfile.py --host=http://localhost:8000 \
+  -u 200 -r 20 --locustfile-classes HighTrafficUser,ComplexScenarioUser
+```
+
+Metrics tracked:
+
+- **Response time** (min, max, avg, median)
+- **Request/error rates**
+- **P95/P99 latency**
+- **Throughput** (requests per second)
+- **Failure distribution** (by endpoint)
+
+Export results:
+
+```bash
+# CSV format (for analysis in Excel/Python)
+locust -f locustfile.py --host=http://localhost:8000 --headless \
+  -u 100 -r 10 -t 60s --csv=reports/load_test
+
+# This creates: reports/load_test_stats.csv, load_test_stats_history.csv, load_test_failures.csv
+```
+
+### Test Structure
+
+```
+tests/
+├── test_proxy.py              # Core proxy functionality
+├── test_admin_csrf.py         # Admin auth & CSRF validation
+├── test_admin_nonascii.py     # Unicode handling
+├── test_security_dynamic.py   # Dynamic security features
+├── test_integration_e2e.py    # End-to-end workflows (NEW)
+├── test_benchmarks.py         # Latency & throughput benchmarks (NEW)
+└── __pycache__/
+locustfile.py                  # Load testing scenarios (NEW)
+```
+
+## Analytics & Monitoring
+
+The proxy includes a comprehensive analytics system for monitoring traffic patterns, security events, and detecting anomalies.
+
+### Admin Dashboard
+
+Visit **http://localhost:8080** to access the analytics dashboard:
+
+- **Live traffic metrics** — Total requests, blocked requests, WAF matches
+- **Security overview** — Attack types, rate-limit blocks, anomaly count
+- **Interactive charts** — Hourly traffic trends, top endpoints, top attackers
+- **Data exports** — Download reports in CSV or PDF format
+- **Auto-refresh** — Dashboard updates every 30 seconds
+
+### Analytics API Endpoints
+
+```bash
+# Get comprehensive dashboard data
+curl http://localhost:8080/api/analytics/dashboard
+
+# Traffic statistics
+curl "http://localhost:8080/api/analytics/traffic?hours=24"
+
+# Top violated WAF rules
+curl http://localhost:8080/api/analytics/waf-rules
+
+# Top blocked IP addresses
+curl http://localhost:8080/api/analytics/blocked-ips
+
+# Hourly traffic time series
+curl http://localhost:8080/api/analytics/hourly-traffic
+
+# Detect anomalies (spike/dip in traffic)
+curl "http://localhost:8080/api/analytics/anomalies?hours=24&threshold=2.0"
+
+# Detailed report (JSON)
+curl "http://localhost:8080/api/analytics/report?hours=24"
+
+# Export as CSV
+curl http://localhost:8080/api/analytics/export/csv > report.csv
+
+# Export as PDF
+curl http://localhost:8080/api/analytics/export/pdf > report.pdf
+```
+
+### Analytics Capabilities
+
+The `TrafficAnalytics` class (in `proxy/analytics.py`) provides:
+
+| Method | Purpose | Returns |
+|--------|---------|---------|
+| `load_events(hours)` | Load security events from JSONL | List of events |
+| `get_traffic_stats(hours)` | Total/blocked/WAF counts | Dict with counts and rates |
+| `get_top_waf_rules(limit)` | Rank WAF violations | List of rule:count pairs |
+| `get_top_blocked_ips(limit)` | Rank blocked IPs | List of ip:count pairs |
+| `get_hourly_traffic(hours)` | Aggregate traffic by hour | Time series data |
+| `detect_anomalies(hours, threshold)` | Find traffic spikes/dips | List of anomalies |
+| `get_detailed_report(hours)` | Comprehensive multi-metric report | Full summary dict |
+| `export_to_csv(filepath, data)` | Write analytics to CSV file | Saved file path |
+
+### Anomaly Detection
+
+The system detects traffic anomalies using Z-score based analysis:
+
+```python
+# Detect anomalies with custom threshold
+anomalies = analytics.detect_anomalies(hours=24, threshold=2.0)
+
+# Each anomaly contains:
+{
+  'hour': '2024-08-25T14:00:00+00:00',
+  'request_count': 250,
+  'expected_count': 50,
+  'z_score': 3.2,
+  'anomaly_type': 'spike'  # or 'dip'
+}
+```
+
+**Threshold guide:**
+- **threshold=1.5** — Sensitive (catches minor variations)
+- **threshold=2.0** — Standard (good for typical traffic patterns)
+- **threshold=3.0** — Strict (only major anomalies)
+
+### Analyzing Raw Logs
+
+The proxy logs all events to JSONL files:
+
+```bash
+# View recent security events
+tail -f logs/proxy-events.jsonl | jq 'select(.event=="blocked") | {timestamp, reason, source_ip}'
+
+# Export events for time period to CSV
+python3 -c "
+from proxy.analytics import TrafficAnalytics
+analytics = TrafficAnalytics()
+data = analytics.get_detailed_report(hours=24)
+analytics.export_to_csv('daily_report.csv', [data])
+"
+
+# Find requests from specific IP
+jq 'select(.source_ip=="192.168.1.100")' logs/proxy-events.jsonl
+
+# Analyze request sizes
+jq '.request_size' logs/requests.jsonl | sort -n | tail -20
+```
+
+### Testing Analytics
+
+Run analytics tests to verify functionality:
+
+```bash
+# Run all analytics tests
+pytest tests/test_analytics.py -v
+
+# Test specific analytics feature
+pytest tests/test_analytics.py::TestTrafficAnalytics::test_get_traffic_stats -v
+
+# Test anomaly detection
+pytest tests/test_analytics.py::TestAnomalyDetection -v
+
+# Test export formats
+pytest tests/test_analytics.py::TestReportExport -v
+```
 
 ## Notes
 

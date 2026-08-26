@@ -3,14 +3,16 @@ import logging
 import os
 import hmac
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request, WebSocket
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from redis.asyncio import Redis
 
 from proxy.config import ConfigManager
 from proxy.model import train_model
 from proxy.rate_limit import get_blocked_ips, get_rate_limit_stats, get_redis_client
+from proxy.analytics import TrafficAnalytics
 
 @asynccontextmanager
 async def lifespan(app_instance: FastAPI):
@@ -36,6 +38,7 @@ redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 config_file = os.getenv('CONFIG_FILE', 'config.yaml')
 redis_client: Redis | None = None
 config_manager = ConfigManager(config_file, redis_url=redis_url)
+analytics = TrafficAnalytics()
 
 
 def _get_expected_admin_token() -> str | None:
@@ -126,27 +129,137 @@ async def index():
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Proxy Admin</title>
-  <style>body { font-family: sans-serif; padding: 1rem; } .card { border: 1px solid #ddd; margin: 0.75rem 0; padding: 1rem; border-radius: 6px; }</style>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Proxy Analytics Dashboard</title>
+  <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; padding: 20px; }
+    .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; border-radius: 8px; margin-bottom: 30px; }
+    .header h1 { font-size: 32px; margin-bottom: 10px; }
+    .header p { opacity: 0.9; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin-bottom: 30px; }
+    .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+    .card h3 { margin-bottom: 15px; color: #333; border-bottom: 2px solid #667eea; padding-bottom: 10px; }
+    .stat { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #eee; }
+    .stat:last-child { border-bottom: none; }
+    .stat-label { color: #666; }
+    .stat-value { font-weight: bold; color: #333; font-size: 18px; }
+    .stat-value.danger { color: #e74c3c; }
+    .stat-value.warning { color: #f39c12; }
+    .stat-value.success { color: #27ae60; }
+    .chart-container { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 20px; }
+    .chart-container h3 { margin-bottom: 20px; color: #333; }
+    .button-group { display: flex; gap: 10px; margin-top: 15px; }
+    button { background: #667eea; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-size: 14px; transition: background 0.3s; }
+    button:hover { background: #764ba2; }
+    button.secondary { background: #95a5a6; }
+    button.secondary:hover { background: #7f8c8d; }
+    .table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    .table th { background: #f8f9fa; padding: 12px; text-align: left; font-weight: bold; border-bottom: 2px solid #dee2e6; }
+    .table td { padding: 12px; border-bottom: 1px solid #dee2e6; }
+    .table tbody tr:hover { background: #f8f9fa; }
+    .alert { padding: 15px; border-radius: 5px; margin-bottom: 15px; }
+    .alert-info { background: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
+    .alert-warning { background: #fff3cd; color: #856404; border: 1px solid #ffeeba; }
+    .footer { text-align: center; color: #666; font-size: 12px; margin-top: 30px; }
+  </style>
 </head>
 <body>
-  <h1>Proxy Admin</h1>
-  <div class="card">
-    <h2>WAF Rules</h2>
-    <div id="rules"></div>
+  <div class="header">
+    <h1>🔒 Proxy Analytics Dashboard</h1>
+    <p>Real-time traffic analysis, security metrics, and anomaly detection</p>
   </div>
-  <div class="card">
-    <h2>Blocked / Suspicious IPs</h2>
-    <div id="blocked"></div>
+  
+  <div class="grid">
+    <div class="card">
+      <h3>📊 Traffic Summary</h3>
+      <div class="stat">
+        <span class="stat-label">Total Requests</span>
+        <span class="stat-value" id="total-requests">-</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">Blocked Requests</span>
+        <span class="stat-value danger" id="blocked-requests">-</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">WAF Blocks</span>
+        <span class="stat-value warning" id="waf-blocks">-</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">Block Rate</span>
+        <span class="stat-value danger" id="block-rate">-</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>🛡️ Security Status</h3>
+      <div class="stat">
+        <span class="stat-label">Total Events</span>
+        <span class="stat-value" id="security-total">-</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">WAF Events</span>
+        <span class="stat-value warning" id="security-waf">-</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">Rate Limit Events</span>
+        <span class="stat-value warning" id="security-rate-limit">-</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">SSRF Blocks</span>
+        <span class="stat-value" id="security-ssrf">-</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>⚙️ Admin Controls</h3>
+      <div class="button-group">
+        <button onclick="refreshDashboard()">🔄 Refresh</button>
+        <button class="secondary" onclick="exportCSV()">📥 Export CSV</button>
+        <button class="secondary" onclick="exportPDF()">📄 Export PDF</button>
+      </div>
+      <div style="margin-top: 20px;">
+        <h4 style="margin-bottom: 10px;">WAF Rules</h4>
+        <div id="waf-rules-list"></div>
+      </div>
+    </div>
   </div>
-  <div class="card">
-    <h2>Live Stats</h2>
-    <div id="stats"></div>
+
+  <div class="chart-container">
+    <h3>📈 Hourly Traffic</h3>
+    <div id="hourly-chart" style="height: 400px;"></div>
   </div>
-  <div class="card">
-    <h2>Recent Activity</h2>
-    <div id="activity"></div>
+
+  <div class="chart-container">
+    <h3>🔴 Top WAF Rules</h3>
+    <table class="table">
+      <thead>
+        <tr><th>Rule</th><th>Blocks</th></tr>
+      </thead>
+      <tbody id="waf-rules-table"></tbody>
+    </table>
   </div>
+
+  <div class="chart-container">
+    <h3>⛔ Top Blocked IPs</h3>
+    <table class="table">
+      <thead>
+        <tr><th>IP Address</th><th>Blocks</th></tr>
+      </thead>
+      <tbody id="blocked-ips-table"></tbody>
+    </table>
+  </div>
+
+  <div class="chart-container">
+    <h3>⚠️ Detected Anomalies</h3>
+    <div id="anomalies-list"></div>
+  </div>
+
+  <div class="footer">
+    <p>Last updated: <span id="last-updated">-</span></p>
+  </div>
+
   <script>
     function getCookie(name) {
       const value = `; ${document.cookie}`;
@@ -168,68 +281,118 @@ async def index():
           ...(options.headers || {}),
         },
       });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return await res.json();
     }
 
-    async function refresh() {
-        const rules = await fetchJson('/api/rules');
-            const rulesDiv = document.getElementById('rules');
-            rulesDiv.innerHTML = '';
-            for (const [name, enabled] of Object.entries(rules)) {
-                const btn = document.createElement('button');
-                btn.textContent = enabled ? 'Disable' : 'Enable';
-                btn.onclick = async () => {
-                    await fetch(`/api/rules/${name}/toggle`, { method: 'POST', headers: csrfHeaders() });
-                    refresh();
-                };
-                const item = document.createElement('div');
-                item.textContent = name + ': ' + enabled;
-                item.append(' ', btn);
-                rulesDiv.appendChild(item);
-            }
-            const blocked = await fetchJson('/api/blocked_ips');
-            const blockedDiv = document.getElementById('blocked');
-            blockedDiv.innerHTML = '';
-            if (!blocked || blocked.length === 0) {
-                const noDiv = document.createElement('div');
-                noDiv.textContent = 'No blocked IPs';
-                blockedDiv.appendChild(noDiv);
-            } else {
-                for (const item of blocked) {
-                    const d = document.createElement('div');
-                    d.textContent = `${item.ip} — score ${item.score}`;
-                    blockedDiv.appendChild(d);
-                }
-            }
-            const stats = await fetchJson('/api/stats');
-            const statsDiv = document.getElementById('stats');
-            statsDiv.innerHTML = '';
-            statsDiv.appendChild(Object.assign(document.createElement('div'), { textContent: `Request count: ${stats.request_count}` }));
-            statsDiv.appendChild(Object.assign(document.createElement('div'), { textContent: `Anomaly blocks: ${stats.anomaly_count}` }));
-            statsDiv.appendChild(Object.assign(document.createElement('div'), { textContent: `Suspicious IPs: ${stats.suspicious_ips}` }));
-            statsDiv.appendChild(Object.assign(document.createElement('div'), { textContent: `Blocked IPs: ${stats.blocked_ips}` }));
-            const retrainBtn = document.createElement('button');
-            retrainBtn.textContent = 'Retrain ML model';
-            retrainBtn.onclick = () => fetch('/api/ml/retrain', { method: 'POST', headers: csrfHeaders() }).then(() => refresh());
-            statsDiv.appendChild(retrainBtn);
-            const activity = await fetchJson('/api/activity');
-            const activityDiv = document.getElementById('activity');
-            activityDiv.innerHTML = '';
-            if (!activity || activity.length === 0) {
-                const noAct = document.createElement('div');
-                noAct.textContent = 'No recent activity';
-                activityDiv.appendChild(noAct);
-            } else {
-                for (const item of activity) {
-                    const a = document.createElement('div');
-                    a.textContent = `${item.timestamp}: ${item.event} :: ${item.path || '-'} :: ${item.client_ip || '-'}`;
-                    activityDiv.appendChild(a);
-                }
-            }
+    async function refreshDashboard() {
+      try {
+        const data = await fetchJson('/api/analytics/dashboard');
+        
+        // Traffic stats
+        const traffic = data.traffic_stats;
+        document.getElementById('total-requests').textContent = traffic.total_requests;
+        document.getElementById('blocked-requests').textContent = traffic.blocked_requests;
+        document.getElementById('waf-blocks').textContent = traffic.waf_blocks;
+        document.getElementById('block-rate').textContent = traffic.block_rate + '%';
+        
+        // Security summary
+        const security = data.security_summary;
+        document.getElementById('security-total').textContent = security.total_events;
+        document.getElementById('security-waf').textContent = security.waf_events;
+        document.getElementById('security-rate-limit').textContent = security.rate_limit_events;
+        document.getElementById('security-ssrf').textContent = security.ssrf_blocked;
+        
+        // Hourly traffic chart
+        const hourly = data.hourly_traffic;
+        if (hourly.length > 0) {
+          const hours = hourly.map(h => h.hour.split(' ')[1]);
+          const totals = hourly.map(h => h.total);
+          const blocked = hourly.map(h => h.blocked);
+          
+          const trace1 = { x: hours, y: totals, type: 'scatter', mode: 'lines+markers', name: 'Total' };
+          const trace2 = { x: hours, y: blocked, type: 'scatter', mode: 'lines+markers', name: 'Blocked' };
+          Plotly.newPlot('hourly-chart', [trace1, trace2], { 
+            responsive: true,
+            margin: { l: 50, r: 50, t: 20, b: 50 },
+          });
+        }
+        
+        // WAF rules table
+        const wafRules = data.top_waf_rules;
+        const wafTable = document.getElementById('waf-rules-table');
+        wafTable.innerHTML = '';
+        for (const rule of wafRules) {
+          wafTable.innerHTML += `<tr><td>${rule.rule}</td><td>${rule.count}</td></tr>`;
+        }
+        
+        // Blocked IPs table
+        const blockedIps = data.top_blocked_ips;
+        const ipTable = document.getElementById('blocked-ips-table');
+        ipTable.innerHTML = '';
+        for (const ip of blockedIps) {
+          ipTable.innerHTML += `<tr><td>${ip.ip}</td><td>${ip.count}</td></tr>`;
+        }
+        
+        // Anomalies
+        const anomalies = await fetchJson('/api/analytics/anomalies');
+        const anomaliesDiv = document.getElementById('anomalies-list');
+        anomaliesDiv.innerHTML = '';
+        if (anomalies.length === 0) {
+          anomaliesDiv.innerHTML = '<p style="color: #27ae60;">✓ No anomalies detected</p>';
+        } else {
+          for (const anom of anomalies) {
+            anomaliesDiv.innerHTML += `<div class="alert alert-warning">
+              <strong>${anom.hour}:</strong> ${anom.anomaly_type.toUpperCase()} detected (${anom.traffic} requests, Z-score: ${anom.z_score})
+            </div>`;
+          }
+        }
+        
+        // Update timestamp
+        document.getElementById('last-updated').textContent = new Date().toLocaleTimeString();
+      } catch (err) {
+        console.error('Error refreshing dashboard:', err);
+        alert('Error loading analytics: ' + err.message);
+      }
     }
-    refresh();
-    const ws = new WebSocket((location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws/config');
-    ws.onmessage = () => refresh();
+
+    async function exportCSV() {
+      try {
+        const res = await fetch('/api/analytics/export/csv', {
+          headers: csrfHeaders(),
+        });
+        const blob = await res.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'traffic_report.csv';
+        a.click();
+      } catch (err) {
+        alert('Error exporting CSV: ' + err.message);
+      }
+    }
+
+    async function exportPDF() {
+      try {
+        const res = await fetch('/api/analytics/export/pdf', {
+          headers: csrfHeaders(),
+        });
+        const blob = await res.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'traffic_report.pdf';
+        a.click();
+      } catch (err) {
+        alert('Error exporting PDF: ' + err.message);
+      }
+    }
+
+    // Initial load
+    refreshDashboard();
+    
+    // Auto-refresh every 30 seconds
+    setInterval(refreshDashboard, 30000);
   </script>
 </body>
 </html>'''
@@ -294,6 +457,190 @@ async def retrain_ml():
         return JSONResponse({'status': 'ok'})
     except Exception as exc:
         return JSONResponse({'status': 'error', 'message': str(exc)}, status_code=500)
+
+
+# ============ Analytics Endpoints ============
+
+@app.get('/api/analytics/dashboard')
+async def analytics_dashboard():
+    """Отримати повний дашборд аналітики"""
+    hours = 24
+    return JSONResponse({
+        'traffic_stats': analytics.get_traffic_stats(hours),
+        'top_waf_rules': analytics.get_top_waf_rules(limit=10, hours=hours),
+        'top_blocked_ips': analytics.get_top_blocked_ips(limit=10, hours=hours),
+        'traffic_by_method': analytics.get_traffic_by_method(hours),
+        'traffic_by_status': analytics.get_traffic_by_status(hours),
+        'hourly_traffic': analytics.get_hourly_traffic(hours),
+        'top_paths': analytics.get_path_statistics(limit=15, hours=hours),
+        'security_summary': analytics.get_security_summary(hours),
+    })
+
+
+@app.get('/api/analytics/traffic')
+async def analytics_traffic(request: Request):
+    """Статистика трафіку"""
+    hours = int(request.query_params.get('hours', 24))
+    return JSONResponse(analytics.get_traffic_stats(hours))
+
+
+@app.get('/api/analytics/waf-rules')
+async def analytics_waf_rules():
+    """Топ порушених WAF правил"""
+    hours = 24
+    limit = 10
+    return JSONResponse(analytics.get_top_waf_rules(limit=limit, hours=hours))
+
+
+@app.get('/api/analytics/blocked-ips')
+async def analytics_blocked_ips():
+    """Топ заблокованих IP адрес"""
+    hours = 24
+    limit = 10
+    return JSONResponse(analytics.get_top_blocked_ips(limit=limit, hours=hours))
+
+
+@app.get('/api/analytics/hourly-traffic')
+async def analytics_hourly():
+    """Трафік по часам"""
+    hours = 24
+    return JSONResponse(analytics.get_hourly_traffic(hours))
+
+
+@app.get('/api/analytics/anomalies')
+async def analytics_anomalies():
+    """Виявлені аномалії у трафіку"""
+    hours = 24
+    return JSONResponse(analytics.detect_anomalies(hours, threshold=2.0))
+
+
+@app.get('/api/analytics/report')
+async def analytics_report():
+    """Детальний звіт"""
+    hours = 24
+    return JSONResponse(analytics.get_detailed_report(hours))
+
+
+@app.get('/api/analytics/export/csv')
+async def analytics_export_csv():
+    """Експорт звіту в CSV"""
+    try:
+        import tempfile
+        report_data = analytics.get_hourly_traffic(24)
+        
+        # Створити тимчасовий файл
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False, encoding='utf-8') as f:
+            import csv
+            writer = csv.DictWriter(f, fieldnames=['hour', 'total', 'blocked'])
+            writer.writeheader()
+            writer.writerows(report_data)
+            temp_path = f.name
+        
+        return FileResponse(temp_path, media_type='text/csv', filename='traffic_report.csv')
+    except Exception as e:
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@app.get('/api/analytics/export/pdf')
+async def analytics_export_pdf():
+    """Експорт звіту в PDF"""
+    try:
+        import tempfile
+        from reportlab.lib.pagesizes import letter
+        from reportlab.lib import colors
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import inch
+        
+        report = analytics.get_detailed_report(24)
+        
+        # Створити PDF
+        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as f:
+            pdf_path = f.name
+        
+        doc = SimpleDocTemplate(pdf_path, pagesize=letter, topMargin=0.5*inch, bottomMargin=0.5*inch)
+        story = []
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Heading1'],
+            fontSize=24,
+            textColor=colors.HexColor('#1f77b4'),
+            spaceAfter=30,
+        )
+        
+        # Заголовок
+        story.append(Paragraph('Traffic Analytics Report', title_style))
+        story.append(Spacer(1, 0.2*inch))
+        
+        # Трафік статистика
+        story.append(Paragraph('Traffic Statistics', styles['Heading2']))
+        traffic = report['traffic_stats']
+        traffic_data = [
+            ['Metric', 'Value'],
+            ['Total Requests', str(traffic['total_requests'])],
+            ['Blocked Requests', str(traffic['blocked_requests'])],
+            ['WAF Blocks', str(traffic['waf_blocks'])],
+            ['Block Rate (%)', str(traffic['block_rate'])],
+        ]
+        traffic_table = Table(traffic_data)
+        traffic_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 14),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black),
+        ]))
+        story.append(traffic_table)
+        story.append(Spacer(1, 0.3*inch))
+        
+        # Топ WAF правила
+        story.append(Paragraph('Top WAF Rules', styles['Heading2']))
+        waf_rules = report['top_waf_rules']
+        if waf_rules:
+            waf_data = [['Rule', 'Count']]
+            for rule in waf_rules[:5]:
+                waf_data.append([rule['rule'], str(rule['count'])])
+            waf_table = Table(waf_data)
+            waf_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black),
+            ]))
+            story.append(waf_table)
+        else:
+            story.append(Paragraph('No WAF blocks detected', styles['Normal']))
+        story.append(Spacer(1, 0.3*inch))
+        
+        # Топ заблоковані IPs
+        story.append(Paragraph('Top Blocked IPs', styles['Heading2']))
+        blocked_ips = report['top_blocked_ips']
+        if blocked_ips:
+            ip_data = [['IP Address', 'Count']]
+            for ip in blocked_ips[:5]:
+                ip_data.append([ip['ip'], str(ip['count'])])
+            ip_table = Table(ip_data)
+            ip_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black),
+            ]))
+            story.append(ip_table)
+        else:
+            story.append(Paragraph('No blocked IPs', styles['Normal']))
+        
+        # Побудувати PDF
+        doc.build(story)
+        return FileResponse(pdf_path, media_type='application/pdf', filename='traffic_report.pdf')
+    except Exception as e:
+        return JSONResponse({'error': str(e)}, status_code=500)
 
 
 @app.websocket('/ws/config')
